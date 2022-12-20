@@ -59,7 +59,15 @@ module DomainLock = struct
   let is_held ctx =
   	  let lockset = ctx.ask Queries.MustLockset in
   	  let lock = get ctx |> LockDomain.Addr.to_var |> Option.get in
+	  ignore (Pretty.printf "lockset: %a\n" Queries.LS.pretty lockset);
   	  Queries.LS.mem (lock, `NoOffset) lockset
+end
+
+module CStubs = struct
+	let is_cstub (f:fundec) =
+		(* TODO: handle finalizer too, lock held?.. *)
+		(* FIXME: better way to detect CAMLprim *)
+		hasAttribute {|section|} f.svar.vattr
 end
 
 module Spec : Analyses.MCPSpec =
@@ -88,17 +96,18 @@ struct
   		(* TODO: trace ignore (Pretty.printf "has_ocaml_value? %a\n" Cil.d_exp e); *)
   		false
 
-  let body ctx _ =
-	  let lock = DomainLock.get ctx in
-	  (* TODO: only on CAMLprim *)
-  	  ctx.emit (Events.Lock (lock, true));
+  let body ctx f =
+  	  if CStubs.is_cstub f then begin
+	  	  let lock = DomainLock.get ctx in
+  	  	  ctx.emit (Events.Lock (lock, true));
+  	  end;
   	  ctx.local
 
-  let return ctx _ _ =
-	  let lock = DomainLock.get ctx in
-	  (* TODO: only on CAMLprim *)
-  	  ctx.emit (Events.Unlock lock);
-  	  ctx.local
+  let return ctx _ (f:fundec) =
+  	  if CStubs.is_cstub f then
+	  	  let lock = DomainLock.get ctx in
+  	  	  ctx.emit (Events.Unlock lock);
+  	  	  ctx.local
 
   let special (ctx:(D.t, G.t, C.t,V.t) ctx) (lval: lval option) (f:varinfo) (arglist:exp list) =
   	match f.vname with
@@ -119,7 +128,7 @@ struct
 		ctx.local
   	| _ ->
   		let () = arglist |> List.iter @@ fun arg ->
-			if has_ocaml_value arg then
+			if has_ocaml_value arg && not @@ DomainLock.is_held ctx then
 				Messages.error ~category:Messages.Category.Race
 					"DomainLock: Call using OCaml value after domain lock has been released: %s(... %a ...)"
 					f.vname Cil.d_exp arg

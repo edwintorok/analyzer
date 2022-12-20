@@ -1,0 +1,3 @@
+#!/usr/bin/zsh
+./run -I ~/xen-public/tools/ocaml/libs/mmap -I ~/xen-public/tools/include -I ~/xen-public/tools/ocaml/libs/xentoollog/ ~/xen-public/tools/ocaml/libs/{eventchn,mmap,xb,xc}/*.c ~/xen-public/tools/ocaml/xenstored/*.c 2>&1 | tee output
+grep DomainLock output >output.problems

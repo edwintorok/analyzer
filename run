@@ -1,0 +1,2 @@
+# dune exec ./goblint -- --set 'pre.cppflags[+]' -D'_Alignas(x)=__attribute__((__aligned__(x)))' --enable dbg.debug --set 'ana.activated[+]' domainlock ~/xen-public/tools/ocaml/testme.c ~/xen-public/tools/ocaml/libs/eventchn/xeneventchn_stubs.c -I ~/.opam/5.0.0/lib/ocaml
+dune exec ./goblint -- --set 'pre.cppflags[+]' -D'__thread=_Atomic' --set 'pre.cppflags[+]' -D'_Alignas(x)=__attribute__((__aligned__(x)))' --enable dbg.debug --set 'ana.activated[+]' domainlock -I caml --enable allfuns $@
