@@ -54,7 +54,7 @@ end
 
 module DomainLock = struct
   let get (ctx) =
-  	  LockDomain.Addr.from_var @@ ThreadLocal.get "ocaml_domain_lock" ctx
+  	  LockDomain.Addr.from_var @@ ThreadLocal.get "__VERIFIER_ocaml_domain_lock" ctx
 
   let is_held ctx =
   	  let lockset = ctx.ask Queries.MustLockset in
