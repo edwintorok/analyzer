@@ -2,38 +2,74 @@ open Prelude.Ana
 open Analyses
 open Cilint
 
-module DomainLock =
+(* OCaml 5 style per-domain lock which must be held before calling the OCaml
+   runtime functions.
+
+   __thread local variables are not yet supported by goblint/CIL,
+   so it may report a race on caml_local_roots, which can be avoided by
+   wrapping memory.h local root manipulation with __VERIFIER_atomic_begin and
+   __VERIFIER_atomic_end
+
+   For now declare the domain lock as a function-local variable to simplify
+   analysis (and we'll require that all ocaml runtime functions called have
+   that lock held, but it'll make function exit awkward as we'd be leaking a
+   lock, so we'll need to unlock it on return..)
+
+   Actually we do have a threadid query which we can use
+ *)
+
+(* callbacks are more difficult to handle because we may not know the domain
+   lock state there,
+   and have to do interprocedural analysis...
+*)
+
+
+module ThreadLocal =
 struct
-  include Printable.Std
+  module TID = ThreadIdDomain.FlagConfiguredTID
 
-  type t = Acquired | Released [@@deriving eq, ord, hash, to_yojson, show]
-  let name () = "domainlock"
+  module HC = Printable.HConsed(TID)
 
-  include Printable.SimpleShow (struct
-      type nonrec t = t
-      let show = show
-    end)
+  let fallback_global = TID.threadinit ~multiple:false (makeGlobalVar "__fallback_global__" intType)
+
+  (** if we can implement __thread of get_domain_state with this then maybe we
+   won't need the atomic begin/end
+   *)
+
+  let get name (ctx) =
+  	  let ask = Analyses.ask_of_ctx ctx in
+  	  let tid =
+  	  	  match ThreadId.get_current ask with
+  	  	  | `Lifted tid -> tid
+  	  	  | `Top | `Bot -> fallback_global
+  	  in
+  	  let create_var tid =
+		  let tid_name =
+		  	  ThreadIdDomain.FlagConfiguredTID.show tid
+		  in
+  	  	  Goblintutil.create_var (makeGlobalVar (name ^ "_" ^ tid_name) intType)
+  	  in
+  	  HC.lift_f create_var @@ HC.lift tid
 end
 
-(* Now we turn this into a lattice by adding Top and Bottom elements.
- * We then lift the above operations to the lattice. *)
-module SL =
-struct
-  include Lattice.Flat (DomainLock) (Printable.DefaultNames)
+module DomainLock = struct
+  let get (ctx) =
+  	  LockDomain.Addr.from_var @@ ThreadLocal.get "ocaml_domain_lock" ctx
 
-  let acquired = `Lifted DomainLock.Acquired
-  let released = `Lifted DomainLock.Released
+  let is_held ctx =
+  	  let lockset = ctx.ask Queries.MustLockset in
+  	  let lock = get ctx |> LockDomain.Addr.to_var |> Option.get in
+  	  Queries.LS.mem (lock, `NoOffset) lockset
 end
 
 module Spec : Analyses.MCPSpec =
 struct
   let name () = "domainlock"
 
-  module D = SL
+  module D = Lattice.Unit
   module C = D
-
   let startstate v = D.bot ()
-  let exitstate = startstate
+  let exitstate v = D.top ()
 
   include Analyses.IdentitySpec
 
@@ -49,22 +85,45 @@ struct
     | BinOp(_, a, b, _) ->
     		has_ocaml_value a || has_ocaml_value b
   	| e ->
-  		ignore (Pretty.printf "has_ocaml_value? %a\n" Cil.d_exp e);
+  		(* TODO: trace ignore (Pretty.printf "has_ocaml_value? %a\n" Cil.d_exp e); *)
   		false
+
+  let body ctx _ =
+	  let lock = DomainLock.get ctx in
+	  (* TODO: only on CAMLprim *)
+  	  ctx.emit (Events.Lock (lock, true));
+  	  ctx.local
+
+  let return ctx _ _ =
+	  let lock = DomainLock.get ctx in
+	  (* TODO: only on CAMLprim *)
+  	  ctx.emit (Events.Unlock lock);
+  	  ctx.local
 
   let special (ctx:(D.t, G.t, C.t,V.t) ctx) (lval: lval option) (f:varinfo) (arglist:exp list) =
   	match f.vname with
-  	| "caml_enter_blocking_section" -> C.released
-  	| "caml_leave_blocking_section" -> C.acquired
+  	| "caml_enter_blocking_section" ->
+		let lock = DomainLock.get ctx in
+  		ctx.emit (Events.Unlock (lock));
+		ctx.local
+  	| "caml_leave_blocking_section" ->
+		let lock = DomainLock.get ctx in
+  		ctx.emit (Events.Lock (lock, true));
+		ctx.local
+	| name when String.starts_with "caml_" name ->
+		(* call into OCaml runtime system, must hold domain lock *)
+		if not @@ DomainLock.is_held ctx then
+			(* TODO: perhaps show last lock/release position? *)
+			Messages.error ~category:Messages.Category.Race "DomainLock: must be held
+			when calling OCaml runtime function";
+		ctx.local
   	| _ ->
   		let () = arglist |> List.iter @@ fun arg ->
 			if has_ocaml_value arg then
-				Messages.warn ~category:Messages.Category.Race "MYMESSAGE Call using
-				OCaml value after domain lock as been released: %s(... %a ...)"
-				f.vname Cil.d_exp arg
+				Messages.error ~category:Messages.Category.Race
+					"DomainLock: Call using OCaml value after domain lock has been released: %s(... %a ...)"
+					f.vname Cil.d_exp arg
         in
-  		(* TODO: better logging *)
-  		ignore (Pretty.printf "special(%s) : %a\n" f.vname SL.pretty ctx.local);
   		ctx.local
 
 end
